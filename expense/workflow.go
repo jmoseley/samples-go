@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	"go.temporal.io/api/enums/v1"
 	"go.temporal.io/sdk/workflow"
 )
 
@@ -49,21 +48,20 @@ func SampleExpenseWorkflow(ctx workflow.Context, expenseID string, companyID int
 		return "", nil
 	}
 
-	groupPaymentWorkflowID := fmt.Sprint("group_payments_", companyID)
-	cfo := workflow.ChildWorkflowOptions{
-		WorkflowID:            groupPaymentWorkflowID,
-		WorkflowIDReusePolicy: enums.WORKFLOW_ID_REUSE_POLICY_ALLOW_DUPLICATE_FAILED_ONLY,
+	logger.Info(fmt.Sprint("Sending signal for payment for expense ", expenseID))
+
+	activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		ScheduleToCloseTimeout: time.Minute * 1,
+	})
+
+	var sendPaymentActivityResult string
+	sendPaymentErr := workflow.ExecuteActivity(activityCtx,
+		SignalWithStartExpenseApprovedActivity, expenseID,
+		companyID).Get(ctx, &sendPaymentActivityResult)
+	if sendPaymentErr != nil {
+		return "", err
 	}
-	ctx3 := workflow.WithChildOptions(ctx, cfo)
-
-	// I am using ExecuteChildWorkflow, since I may not know the company ID until the expense is received.
-	groupWorkflowFuture := workflow.ExecuteChildWorkflow(ctx3, SendPaymentsWorkflow, companyID)
-
-	// Since I'm not awaiting the future above, it seems that the signals that are sent, before
-	// the workflow has started, are never delivered.
-	workflow.SignalExternalWorkflow(ctx3, groupPaymentWorkflowID, "", "ExpenseApproved", expenseID)
-
-	groupWorkflowFuture.Get(ctx3, nil)
+	logger.Info(fmt.Sprint("Sent signal for expense ", expenseID, sendPaymentActivityResult))
 
 	return "COMPLETED", nil
 }

@@ -7,8 +7,19 @@ import (
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"time"
 
 	"go.temporal.io/sdk/activity"
+	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/temporal"
+)
+
+type (
+	ContextKey string
+)
+
+const (
+	ClientContextKey ContextKey = "Client"
 )
 
 func CreateExpenseActivity(ctx context.Context, expenseID string) error {
@@ -75,6 +86,41 @@ func WaitForDecisionActivity(ctx context.Context, expenseID string) (string, err
 
 	logger.Warn("Register callback failed.", "ExpenseStatus", status)
 	return "", fmt.Errorf("register callback failed status:%s", status)
+}
+
+func SignalWithStartExpenseApprovedActivity(
+	ctx context.Context,
+	expenseID string,
+	companyID int,
+) (string, error) {
+	c := ctx.Value(ClientContextKey).(client.Client)
+	workflowID := fmt.Sprintf(
+		"%s:%d",
+		"batch_payment",
+		companyID,
+	)
+	workflowOptions := client.StartWorkflowOptions{
+		ID:        workflowID,
+		TaskQueue: "expense",
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval:    time.Second,
+			BackoffCoefficient: 2.0,
+			MaximumInterval:    time.Minute,
+			MaximumAttempts:    5,
+		},
+	}
+	activity.GetLogger(ctx).Info("Signaling for payment", "Company ID", companyID, "Expense ID", expenseID, "WorkflowID", workflowID)
+	wr, err := c.SignalWithStartWorkflow(
+		ctx, workflowID, "ExpenseApproved", expenseID,
+		workflowOptions, SendPaymentsWorkflow, companyID)
+
+	if err != nil {
+		activity.GetLogger(ctx).Error("Unable to signal with start workflow", "Error", err)
+		return "", err
+	}
+	activity.GetLogger(ctx).Info("Signaled and started Workflow", "WorkflowID", wr.GetID(), "RunID", wr.GetRunID())
+
+	return "success", nil
 }
 
 func PaymentActivity(ctx context.Context, expenseID string) error {
