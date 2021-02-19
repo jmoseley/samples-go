@@ -81,6 +81,10 @@ func SendPaymentsWorkflow(ctx workflow.Context, companyID int) (result string, e
 			c.Receive(ctx, &expenseID)
 			logger.Info(fmt.Sprint("Received signal for expense ", expenseID))
 			expenseIDsToPay = append(expenseIDsToPay, expenseID)
+
+			if len(expenseIDsToPay) > 5 {
+				doneWaiting = true
+			}
 		} else {
 			logger.Info(fmt.Sprint("Ignoring signal because payments are sent"))
 		}
