@@ -1,6 +1,7 @@
 package expense
 
 import (
+	"fmt"
 	"time"
 
 	"go.temporal.io/sdk/workflow"
@@ -11,7 +12,7 @@ var (
 )
 
 // SampleExpenseWorkflow workflow definition
-func SampleExpenseWorkflow(ctx workflow.Context, expenseID string) (result string, err error) {
+func SampleExpenseWorkflow(ctx workflow.Context, expenseID string, companyID int) (result string, err error) {
 	// step 1, create new expense report
 	ao := workflow.ActivityOptions{
 		ScheduleToStartTimeout: time.Minute,
@@ -47,13 +48,73 @@ func SampleExpenseWorkflow(ctx workflow.Context, expenseID string) (result strin
 		return "", nil
 	}
 
-	// step 3, request payment to the expense
-	err = workflow.ExecuteActivity(ctx2, PaymentActivity, expenseID).Get(ctx2, nil)
-	if err != nil {
-		logger.Info("Workflow completed with payment failed.", "Error", err)
+	logger.Info(fmt.Sprint("Sending signal for payment for expense ", expenseID))
+
+	activityCtx := workflow.WithActivityOptions(ctx, workflow.ActivityOptions{
+		ScheduleToCloseTimeout: time.Minute * 1,
+	})
+
+	var sendPaymentActivityResult string
+	sendPaymentErr := workflow.ExecuteActivity(activityCtx,
+		SignalWithStartExpenseApprovedActivity, expenseID,
+		companyID).Get(ctx, &sendPaymentActivityResult)
+	if sendPaymentErr != nil {
 		return "", err
 	}
+	logger.Info(fmt.Sprint("Sent signal for expense ", expenseID, sendPaymentActivityResult))
 
-	logger.Info("Workflow completed with expense payment completed.")
 	return "COMPLETED", nil
+}
+
+func SendPaymentsWorkflow(ctx workflow.Context, companyID int) (result string, err error) {
+	logger := workflow.GetLogger(ctx)
+	logger.Info(fmt.Sprint("Payments workflow for company ", companyID))
+
+	var expenseIDsToPay []string
+	var doneWaiting bool
+
+	channel := workflow.GetSignalChannel(ctx, "ExpenseApproved")
+	channelSelector := workflow.NewSelector(ctx)
+	channelSelector.AddReceive(channel, func(c workflow.ReceiveChannel, more bool) {
+		if !doneWaiting {
+			var expenseID string
+			c.Receive(ctx, &expenseID)
+			logger.Info(fmt.Sprint("Received signal for expense ", expenseID))
+			expenseIDsToPay = append(expenseIDsToPay, expenseID)
+
+			if len(expenseIDsToPay) > 5 {
+				doneWaiting = true
+			}
+		} else {
+			logger.Info(fmt.Sprint("Ignoring signal because payments are sent"))
+		}
+	})
+
+	timerFuture := workflow.NewTimer(ctx, time.Second*30)
+	channelSelector.AddFuture(timerFuture, func(f workflow.Future) {
+		doneWaiting = true
+	})
+	for !doneWaiting {
+		channelSelector.Select(ctx)
+	}
+
+	logger.Info(fmt.Sprint("Sending payments for ", len(expenseIDsToPay), " expenses"))
+	// This is my "bulk" api call, just for the sake of the POC.
+	for _, expenseID := range expenseIDsToPay {
+		logger.Info(fmt.Sprint("Sending payment for expense ", expenseID))
+		ao := workflow.ActivityOptions{
+			ScheduleToStartTimeout: time.Minute,
+			StartToCloseTimeout:    time.Minute,
+			HeartbeatTimeout:       time.Second * 20,
+		}
+		ctx1 := workflow.WithActivityOptions(ctx, ao)
+		err = workflow.ExecuteActivity(ctx1, PaymentActivity, expenseID).Get(ctx1, nil)
+		if err != nil {
+			logger.Info("Payment Failed", "Error", err)
+		}
+	}
+
+	logger.Info(fmt.Sprint("Workflow completed for companyID ", companyID))
+
+	return "", workflow.NewContinueAsNewError(ctx, SendPaymentsWorkflow, companyID)
 }

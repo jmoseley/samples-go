@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"log"
 
 	"go.temporal.io/sdk/client"
@@ -19,12 +20,16 @@ func main() {
 	}
 	defer c.Close()
 
-	w := worker.New(c, "expense", worker.Options{})
+	w := worker.New(c, "expense", worker.Options{
+		BackgroundActivityContext: context.WithValue(context.Background(), expense.ClientContextKey, c),
+	})
 
 	w.RegisterWorkflow(expense.SampleExpenseWorkflow)
+	w.RegisterWorkflow(expense.SendPaymentsWorkflow)
 	w.RegisterActivity(expense.CreateExpenseActivity)
 	w.RegisterActivity(expense.WaitForDecisionActivity)
 	w.RegisterActivity(expense.PaymentActivity)
+	w.RegisterActivity(expense.SignalWithStartExpenseApprovedActivity)
 
 	err = w.Run(worker.InterruptCh())
 	if err != nil {
